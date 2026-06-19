@@ -5,6 +5,9 @@ import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -75,27 +78,26 @@ class PlaylistManager(private val context: Context) {
                             continue
                         }
 
-                        val body = response.body?.string() ?: continue
-                        val lines = body.lines()
+                        response.body?.charStream()?.buffered()?.useLines { lines ->
+                            var currentExtInf: String? = null
 
-                        var currentExtInf: String? = null
+                            for (line in lines) {
+                                val trimmed = line.trim()
+                                if (trimmed.isEmpty()) continue
 
-                        for (line in lines) {
-                            val trimmed = line.trim()
-                            if (trimmed.isEmpty()) continue
-
-                            if (trimmed.startsWith("#EXTM3U")) {
-                                if (!cleanLines.contains("#EXTM3U")) {
-                                    cleanLines.add(trimmed)
-                                }
-                            } else if (trimmed.startsWith("#EXTINF")) {
-                                currentExtInf = trimmed
-                            } else if (!trimmed.startsWith("#")) {
-                                itemsToTest.add(PlaylistItem(currentExtInf, trimmed))
-                                currentExtInf = null
-                            } else {
-                                if (!cleanLines.contains(trimmed)) {
-                                    cleanLines.add(trimmed)
+                                if (trimmed.startsWith("#EXTM3U")) {
+                                    if (!cleanLines.contains("#EXTM3U")) {
+                                        cleanLines.add(trimmed)
+                                    }
+                                } else if (trimmed.startsWith("#EXTINF")) {
+                                    currentExtInf = trimmed
+                                } else if (!trimmed.startsWith("#")) {
+                                    itemsToTest.add(PlaylistItem(currentExtInf, trimmed))
+                                    currentExtInf = null
+                                } else {
+                                    if (!cleanLines.contains(trimmed)) {
+                                        cleanLines.add(trimmed)
+                                    }
                                 }
                             }
                         }
@@ -175,6 +177,19 @@ class PlaylistManager(private val context: Context) {
                 .putInt("dead_links", 0)
                 .apply()
 
+            // Throttled UI update job to prevent stutter
+            val progressJob = launch {
+                while (isActive) {
+                    val currentAlive = aliveLinks.get()
+                    val currentDead = deadLinks.get()
+                    prefs.edit()
+                        .putInt("alive_links", currentAlive)
+                        .putInt("dead_links", currentDead)
+                        .apply()
+                    delay(1000)
+                }
+            }
+
             val semaphore = Semaphore(concurrentLinks)
             
             val deferreds = itemsToTest.map { item ->
@@ -188,16 +203,7 @@ class PlaylistManager(private val context: Context) {
                             Log.d("PlaylistManager", "Dead link removed: ${item.url}")
                         }
                         
-                        // Progressive UI update
-                        val currentAlive = aliveLinks.get()
-                        val currentDead = deadLinks.get()
-                        val processed = currentAlive + currentDead
-                        if (processed % 10 == 0 || processed == totalLinks) {
-                            prefs.edit()
-                                .putInt("alive_links", currentAlive)
-                                .putInt("dead_links", currentDead)
-                                .apply()
-                        }
+                        // Removed progressive UI update from inner loop to stop lagging
                         
                         item to isAlive
                     }
@@ -205,6 +211,13 @@ class PlaylistManager(private val context: Context) {
             }
 
             val results = deferreds.awaitAll()
+            progressJob.cancel()
+            
+            // Final exact update
+            prefs.edit()
+                .putInt("alive_links", aliveLinks.get())
+                .putInt("dead_links", deadLinks.get())
+                .apply()
             
             // Assemble clean list maintaining order
             for ((item, isAlive) in results) {
