@@ -22,11 +22,15 @@ class LinkCheckerService : Service() {
     private lateinit var playlistManager: PlaylistManager
     private var localServer: LocalIptvServer? = null
 
+    private var checkJob: Job? = null
+
     companion object {
         const val CHANNEL_ID = "LinkCheckerChannel"
         const val NOTIFICATION_ID = 1
         const val PREFS_NAME = "iptv_prefs"
         const val KEY_PLAYLIST_URL = "playlist_url"
+        const val KEY_INTERVAL_VALUE = "interval_value"
+        const val KEY_INTERVAL_UNIT = "interval_unit"
     }
 
     override fun onCreate() {
@@ -47,17 +51,25 @@ class LinkCheckerService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Read the URL from SharedPreferences
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val url = prefs.getString(KEY_PLAYLIST_URL, null)
+        val intervalValue = prefs.getLong(KEY_INTERVAL_VALUE, 1L)
+        val intervalUnit = prefs.getString(KEY_INTERVAL_UNIT, "HOURS")
+
+        val delayMs = if (intervalUnit == "MINUTES") {
+            intervalValue * 60 * 1000
+        } else {
+            intervalValue * 60 * 60 * 1000
+        }
+
+        checkJob?.cancel()
 
         if (url != null && url.isNotEmpty()) {
-            serviceScope.launch {
+            checkJob = serviceScope.launch {
                 while (isActive) {
                     Log.d("LinkCheckerService", "Starting link check cycle")
                     playlistManager.processPlaylist(url)
-                    // Check every 1 hour (3600000 ms)
-                    delay(3600000)
+                    delay(delayMs)
                 }
             }
         } else {
