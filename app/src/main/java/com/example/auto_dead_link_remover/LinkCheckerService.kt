@@ -31,6 +31,8 @@ class LinkCheckerService : Service() {
         const val KEY_PLAYLIST_URL = "playlist_url"
         const val KEY_INTERVAL_VALUE = "interval_value"
         const val KEY_INTERVAL_UNIT = "interval_unit"
+        const val KEY_TIMEOUT_SECONDS = "timeout_seconds"
+        const val ACTION_FORCE_REFRESH = "com.example.auto_dead_link_remover.FORCE_REFRESH"
     }
 
     override fun onCreate() {
@@ -55,6 +57,15 @@ class LinkCheckerService : Service() {
         val url = prefs.getString(KEY_PLAYLIST_URL, null)
         val intervalValue = prefs.getLong(KEY_INTERVAL_VALUE, 1L)
         val intervalUnit = prefs.getString(KEY_INTERVAL_UNIT, "HOURS")
+        val timeoutSeconds = prefs.getLong(KEY_TIMEOUT_SECONDS, 5L)
+
+        if (intent?.action == ACTION_FORCE_REFRESH && url != null && url.isNotEmpty()) {
+            serviceScope.launch {
+                Log.d("LinkCheckerService", "Force refreshing playlist")
+                playlistManager.processPlaylist(url, timeoutSeconds)
+            }
+            return START_STICKY
+        }
 
         val delayMs = if (intervalUnit == "MINUTES") {
             intervalValue * 60 * 1000
@@ -68,7 +79,7 @@ class LinkCheckerService : Service() {
             checkJob = serviceScope.launch {
                 while (isActive) {
                     Log.d("LinkCheckerService", "Starting link check cycle")
-                    playlistManager.processPlaylist(url)
+                    playlistManager.processPlaylist(url, timeoutSeconds)
                     delay(delayMs)
                 }
             }
