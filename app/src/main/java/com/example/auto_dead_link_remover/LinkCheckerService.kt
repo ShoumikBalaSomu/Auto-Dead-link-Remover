@@ -56,8 +56,8 @@ class LinkCheckerService : Service() {
                 while (isActive) {
                     Log.d("LinkCheckerService", "Starting link check cycle")
                     playlistManager.processPlaylist(url)
-                    // Check every 6 hours (21600000 ms)
-                    delay(21600000)
+                    // Check every 1 hour (3600000 ms)
+                    delay(3600000)
                 }
             }
         } else {
