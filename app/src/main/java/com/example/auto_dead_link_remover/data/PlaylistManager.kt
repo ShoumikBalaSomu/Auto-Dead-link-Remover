@@ -38,7 +38,9 @@ class PlaylistManager(private val context: Context) {
 
         try {
             if (sourceType == "M3U" || sourceType == "XTREAM") {
-                val sourceUrl = if (sourceType == "XTREAM") {
+                val sourceUrls = mutableListOf<String>()
+                
+                if (sourceType == "XTREAM") {
                     val server = prefs.getString("xtream_server", "") ?: ""
                     val user = prefs.getString("xtream_user", "") ?: ""
                     val pass = prefs.getString("xtream_pass", "") ?: ""
@@ -49,43 +51,55 @@ class PlaylistManager(private val context: Context) {
                     if (formattedServer.endsWith("/")) {
                         formattedServer = formattedServer.dropLast(1)
                     }
-                    "$formattedServer/get.php?username=$user&password=$pass&type=m3u_plus&output=ts"
+                    val url = "$formattedServer/get.php?username=$user&password=$pass&type=m3u_plus&output=ts"
+                    sourceUrls.add(url)
                 } else {
-                    prefs.getString("playlist_url", "") ?: ""
+                    val rawUrls = prefs.getString("playlist_url", "") ?: ""
+                    sourceUrls.addAll(rawUrls.split(",", "\n").map { it.trim() }.filter { it.isNotEmpty() })
                 }
 
-                if (sourceUrl.isEmpty() || sourceUrl.isBlank()) {
-                    Log.w("PlaylistManager", "Source URL is empty")
+                if (sourceUrls.isEmpty()) {
+                    Log.w("PlaylistManager", "Source URLs list is empty")
                     return@withContext
                 }
 
-                Log.d("PlaylistManager", "Downloading playlist from: $sourceUrl")
-                val request = Request.Builder().url(sourceUrl).build()
-                val response = client.newCall(request).execute()
-                
-                if (!response.isSuccessful) {
-                    Log.e("PlaylistManager", "Failed to download playlist: ${response.code}")
-                    return@withContext
-                }
+                for (sourceUrl in sourceUrls) {
+                    Log.d("PlaylistManager", "Downloading playlist from: $sourceUrl")
+                    try {
+                        val request = Request.Builder().url(sourceUrl).build()
+                        val response = client.newCall(request).execute()
+                        
+                        if (!response.isSuccessful) {
+                            Log.e("PlaylistManager", "Failed to download playlist: ${response.code} from $sourceUrl")
+                            continue
+                        }
 
-                val body = response.body?.string() ?: return@withContext
-                val lines = body.lines()
+                        val body = response.body?.string() ?: continue
+                        val lines = body.lines()
 
-                var currentExtInf: String? = null
+                        var currentExtInf: String? = null
 
-                for (line in lines) {
-                    val trimmed = line.trim()
-                    if (trimmed.isEmpty()) continue
+                        for (line in lines) {
+                            val trimmed = line.trim()
+                            if (trimmed.isEmpty()) continue
 
-                    if (trimmed.startsWith("#EXTM3U")) {
-                        cleanLines.add(trimmed)
-                    } else if (trimmed.startsWith("#EXTINF")) {
-                        currentExtInf = trimmed
-                    } else if (!trimmed.startsWith("#")) {
-                        itemsToTest.add(PlaylistItem(currentExtInf, trimmed))
-                        currentExtInf = null
-                    } else {
-                        cleanLines.add(trimmed)
+                            if (trimmed.startsWith("#EXTM3U")) {
+                                if (!cleanLines.contains("#EXTM3U")) {
+                                    cleanLines.add(trimmed)
+                                }
+                            } else if (trimmed.startsWith("#EXTINF")) {
+                                currentExtInf = trimmed
+                            } else if (!trimmed.startsWith("#")) {
+                                itemsToTest.add(PlaylistItem(currentExtInf, trimmed))
+                                currentExtInf = null
+                            } else {
+                                if (!cleanLines.contains(trimmed)) {
+                                    cleanLines.add(trimmed)
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("PlaylistManager", "Error downloading from $sourceUrl", e)
                     }
                 }
             } else if (sourceType == "MAC") {

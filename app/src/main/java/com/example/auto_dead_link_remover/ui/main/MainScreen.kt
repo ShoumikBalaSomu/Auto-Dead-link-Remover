@@ -107,7 +107,9 @@ fun MainScreen(
                             OutlinedTextField(
                                 value = url,
                                 onValueChange = { url = it },
-                                label = { Text("IPTV Playlist URL (.m3u, .m3u8)") },
+                                label = { Text("IPTV Playlist URLs (one per line or comma separated)") },
+                                minLines = 3,
+                                maxLines = 5,
                                 modifier = Modifier.fillMaxWidth()
                             )
                         }
