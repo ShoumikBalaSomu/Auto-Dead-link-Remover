@@ -81,4 +81,7 @@ dependencies {
   implementation(libs.androidx.navigation3.ui)
   implementation(libs.androidx.navigation3.runtime)
   implementation(libs.androidx.lifecycle.viewmodel.navigation3)
+
+  implementation("org.nanohttpd:nanohttpd:2.3.1")
+  implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
