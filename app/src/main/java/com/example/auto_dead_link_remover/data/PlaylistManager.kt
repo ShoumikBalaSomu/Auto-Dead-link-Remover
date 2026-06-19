@@ -3,28 +3,38 @@ package com.example.auto_dead_link_remover.data
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class PlaylistManager(private val context: Context) {
+
+    data class PlaylistItem(
+        val extInf: String?,
+        val url: String
+    )
 
     suspend fun processPlaylist(timeoutSeconds: Long) = withContext(Dispatchers.IO) {
         val prefs = context.getSharedPreferences("iptv_prefs", Context.MODE_PRIVATE)
         val client = OkHttpClient.Builder()
             .connectTimeout(timeoutSeconds, TimeUnit.SECONDS)
             .readTimeout(timeoutSeconds, TimeUnit.SECONDS)
+            .connectionPool(ConnectionPool(50, 5, TimeUnit.MINUTES))
             .build()
 
         val sourceType = prefs.getString("source_type", "M3U") ?: "M3U"
         
-        var totalLinks = 0
-        var aliveLinks = 0
-        var deadLinks = 0
         val cleanLines = mutableListOf<String>()
+        val itemsToTest = mutableListOf<PlaylistItem>()
 
         try {
             if (sourceType == "M3U" || sourceType == "XTREAM") {
@@ -72,18 +82,7 @@ class PlaylistManager(private val context: Context) {
                     } else if (trimmed.startsWith("#EXTINF")) {
                         currentExtInf = trimmed
                     } else if (!trimmed.startsWith("#")) {
-                        totalLinks++
-                        val url = trimmed
-                        if (isLinkAlive(url, client)) {
-                            aliveLinks++
-                            if (currentExtInf != null) {
-                                cleanLines.add(currentExtInf)
-                            }
-                            cleanLines.add(url)
-                        } else {
-                            deadLinks++
-                            Log.d("PlaylistManager", "Dead link removed: $url")
-                        }
+                        itemsToTest.add(PlaylistItem(currentExtInf, trimmed))
                         currentExtInf = null
                     } else {
                         cleanLines.add(trimmed)
@@ -142,19 +141,61 @@ class PlaylistManager(private val context: Context) {
                             }
                             
                             if (cmd.isNotEmpty() && (cmd.startsWith("http") || cmd.startsWith("rtmp"))) {
-                                totalLinks++
-                                if (isLinkAlive(cmd, client)) {
-                                    aliveLinks++
-                                    cleanLines.add("#EXTINF:-1,$name")
-                                    cleanLines.add(cmd)
-                                } else {
-                                    deadLinks++
-                                }
+                                itemsToTest.add(PlaylistItem("#EXTINF:-1,$name", cmd))
                             }
                         }
                     } catch (e: Exception) {
                         Log.e("PlaylistManager", "Failed to parse Stalker channels", e)
                     }
+                }
+            }
+
+            val totalLinks = itemsToTest.size
+            val aliveLinks = AtomicInteger(0)
+            val deadLinks = AtomicInteger(0)
+            
+            prefs.edit()
+                .putInt("total_links", totalLinks)
+                .putInt("alive_links", 0)
+                .putInt("dead_links", 0)
+                .apply()
+
+            val semaphore = Semaphore(50)
+            
+            val deferreds = itemsToTest.map { item ->
+                async {
+                    semaphore.withPermit {
+                        val isAlive = isLinkAlive(item.url, client)
+                        if (isAlive) {
+                            aliveLinks.incrementAndGet()
+                        } else {
+                            deadLinks.incrementAndGet()
+                            Log.d("PlaylistManager", "Dead link removed: ${item.url}")
+                        }
+                        
+                        // Progressive UI update
+                        val currentAlive = aliveLinks.get()
+                        val currentDead = deadLinks.get()
+                        val processed = currentAlive + currentDead
+                        if (processed % 10 == 0 || processed == totalLinks) {
+                            prefs.edit()
+                                .putInt("alive_links", currentAlive)
+                                .putInt("dead_links", currentDead)
+                                .apply()
+                        }
+                        
+                        item to isAlive
+                    }
+                }
+            }
+
+            val results = deferreds.awaitAll()
+            
+            // Assemble clean list maintaining order
+            for ((item, isAlive) in results) {
+                if (isAlive) {
+                    item.extInf?.let { cleanLines.add(it) }
+                    cleanLines.add(item.url)
                 }
             }
 
@@ -165,9 +206,6 @@ class PlaylistManager(private val context: Context) {
 
             prefs.edit()
                 .putLong("last_check_time", System.currentTimeMillis())
-                .putInt("total_links", totalLinks)
-                .putInt("alive_links", aliveLinks)
-                .putInt("dead_links", deadLinks)
                 .apply()
 
         } catch (e: Exception) {
