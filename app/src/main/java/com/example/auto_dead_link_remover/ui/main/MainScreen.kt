@@ -41,6 +41,7 @@ fun MainScreen(
     var intervalValue by remember { mutableStateOf(prefs.getLong(LinkCheckerService.KEY_INTERVAL_VALUE, 1L).toString()) }
     var intervalUnit by remember { mutableStateOf(prefs.getString(LinkCheckerService.KEY_INTERVAL_UNIT, "HOURS") ?: "HOURS") }
     var timeoutSeconds by remember { mutableStateOf(prefs.getLong(LinkCheckerService.KEY_TIMEOUT_SECONDS, 5L).toString()) }
+    var concurrentLinks by remember { mutableStateOf(prefs.getInt(LinkCheckerService.KEY_CONCURRENT_LINKS, 50).toString()) }
     var serviceStarted by remember { mutableStateOf(false) }
 
     var lastCheckTime by remember { mutableStateOf(prefs.getLong("last_check_time", 0L)) }
@@ -190,13 +191,25 @@ fun MainScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
             
-            OutlinedTextField(
-                value = timeoutSeconds,
-                onValueChange = { if (it.isEmpty() || it.all { char -> char.isDigit() }) timeoutSeconds = it },
-                label = { Text("Connection Timeout (Seconds)") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.fillMaxWidth()
-            )
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = timeoutSeconds,
+                    onValueChange = { if (it.isEmpty() || it.all { char -> char.isDigit() }) timeoutSeconds = it },
+                    label = { Text("Connection Timeout (Seconds)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f)
+                )
+                
+                Spacer(modifier = Modifier.width(16.dp))
+                
+                OutlinedTextField(
+                    value = concurrentLinks,
+                    onValueChange = { if (it.isEmpty() || it.all { char -> char.isDigit() }) concurrentLinks = it },
+                    label = { Text("Max Concurrent Scans") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f)
+                )
+            }
             
             Spacer(modifier = Modifier.height(24.dp))
         }
@@ -207,6 +220,7 @@ fun MainScreen(
                     onClick = {
                         val finalInterval = intervalValue.toLongOrNull() ?: 1L
                         val finalTimeout = timeoutSeconds.toLongOrNull() ?: 5L
+                        val finalConcurrent = concurrentLinks.toIntOrNull() ?: 50
                         prefs.edit()
                             .putString(LinkCheckerService.KEY_SOURCE_TYPE, sourceType)
                             .putString(LinkCheckerService.KEY_PLAYLIST_URL, url)
@@ -218,6 +232,7 @@ fun MainScreen(
                             .putLong(LinkCheckerService.KEY_INTERVAL_VALUE, finalInterval)
                             .putString(LinkCheckerService.KEY_INTERVAL_UNIT, intervalUnit)
                             .putLong(LinkCheckerService.KEY_TIMEOUT_SECONDS, finalTimeout)
+                            .putInt(LinkCheckerService.KEY_CONCURRENT_LINKS, finalConcurrent)
                             .apply()
                         
                         val serviceIntent = Intent(context, LinkCheckerService::class.java)

@@ -25,10 +25,11 @@ class PlaylistManager(private val context: Context) {
 
     suspend fun processPlaylist(timeoutSeconds: Long) = withContext(Dispatchers.IO) {
         val prefs = context.getSharedPreferences("iptv_prefs", Context.MODE_PRIVATE)
+        val concurrentLinks = prefs.getInt("concurrent_links", 50).coerceAtLeast(1)
         val client = OkHttpClient.Builder()
             .connectTimeout(timeoutSeconds, TimeUnit.SECONDS)
             .readTimeout(timeoutSeconds, TimeUnit.SECONDS)
-            .connectionPool(ConnectionPool(50, 5, TimeUnit.MINUTES))
+            .connectionPool(ConnectionPool(concurrentLinks, 5, TimeUnit.MINUTES))
             .build()
 
         val sourceType = prefs.getString("source_type", "M3U") ?: "M3U"
@@ -174,7 +175,7 @@ class PlaylistManager(private val context: Context) {
                 .putInt("dead_links", 0)
                 .apply()
 
-            val semaphore = Semaphore(50)
+            val semaphore = Semaphore(concurrentLinks)
             
             val deferreds = itemsToTest.map { item ->
                 async {

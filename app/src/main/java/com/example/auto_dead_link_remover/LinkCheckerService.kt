@@ -38,6 +38,8 @@ class LinkCheckerService : Service() {
         const val KEY_INTERVAL_VALUE = "interval_value"
         const val KEY_INTERVAL_UNIT = "interval_unit"
         const val KEY_TIMEOUT_SECONDS = "timeout_seconds"
+        const val KEY_CONCURRENT_LINKS = "concurrent_links"
+        
         const val ACTION_FORCE_REFRESH = "com.example.auto_dead_link_remover.FORCE_REFRESH"
     }
 
