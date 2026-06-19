@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -16,6 +17,7 @@ import com.example.auto_dead_link_remover.LinkCheckerService
 
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -28,7 +30,14 @@ fun MainScreen(
     val context = LocalContext.current
     val prefs = context.getSharedPreferences(LinkCheckerService.PREFS_NAME, Context.MODE_PRIVATE)
     
+    var sourceType by remember { mutableStateOf(prefs.getString(LinkCheckerService.KEY_SOURCE_TYPE, "M3U") ?: "M3U") }
     var url by remember { mutableStateOf(prefs.getString(LinkCheckerService.KEY_PLAYLIST_URL, "") ?: "") }
+    var xtreamServer by remember { mutableStateOf(prefs.getString(LinkCheckerService.KEY_XTREAM_SERVER, "") ?: "") }
+    var xtreamUser by remember { mutableStateOf(prefs.getString(LinkCheckerService.KEY_XTREAM_USER, "") ?: "") }
+    var xtreamPass by remember { mutableStateOf(prefs.getString(LinkCheckerService.KEY_XTREAM_PASS, "") ?: "") }
+    var macServer by remember { mutableStateOf(prefs.getString(LinkCheckerService.KEY_MAC_SERVER, "") ?: "") }
+    var macAddress by remember { mutableStateOf(prefs.getString(LinkCheckerService.KEY_MAC_ADDRESS, "") ?: "") }
+
     var intervalValue by remember { mutableStateOf(prefs.getLong(LinkCheckerService.KEY_INTERVAL_VALUE, 1L).toString()) }
     var intervalUnit by remember { mutableStateOf(prefs.getString(LinkCheckerService.KEY_INTERVAL_UNIT, "HOURS") ?: "HOURS") }
     var timeoutSeconds by remember { mutableStateOf(prefs.getLong(LinkCheckerService.KEY_TIMEOUT_SECONDS, 5L).toString()) }
@@ -57,148 +66,221 @@ fun MainScreen(
         }
     }
 
-    Column(
+    LazyColumn(
         modifier = modifier
             .fillMaxSize()
             .padding(32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+        verticalArrangement = Arrangement.Top
     ) {
-        Text(
-            text = "Auto Dead Link Remover",
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold
-        )
-        
-        Spacer(modifier = Modifier.height(16.dp))
-        
-        OutlinedTextField(
-            value = url,
-            onValueChange = { url = it },
-            label = { Text("IPTV Playlist URL (.m3u, .m3u8)") },
-            modifier = Modifier.fillMaxWidth()
-        )
-        
-        Spacer(modifier = Modifier.height(16.dp))
-        
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = intervalValue,
-                onValueChange = { if (it.isEmpty() || it.all { char -> char.isDigit() }) intervalValue = it },
-                label = { Text("Update Interval") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f)
+        item {
+            Text(
+                text = "Auto Dead Link Remover",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(bottom = 24.dp)
             )
+        }
 
-            Spacer(modifier = Modifier.width(16.dp))
-
-            Row {
-                Button(
-                    onClick = { intervalUnit = "MINUTES" },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (intervalUnit == "MINUTES") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                        contentColor = if (intervalUnit == "MINUTES") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                ) {
-                    Text("Minutes")
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-                Button(
-                    onClick = { intervalUnit = "HOURS" },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (intervalUnit == "HOURS") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                        contentColor = if (intervalUnit == "HOURS") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                ) {
-                    Text("Hours")
+        item {
+            Row(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp), horizontalArrangement = Arrangement.Center) {
+                listOf("M3U", "XTREAM", "MAC").forEach { type ->
+                    Button(
+                        onClick = { sourceType = type },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (sourceType == type) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = if (sourceType == type) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                        ),
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    ) {
+                        Text(if (type == "M3U") "M3U / M3U8" else if (type == "XTREAM") "Xtream Codes" else "MAC / Stalker")
+                    }
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
-        
-        OutlinedTextField(
-            value = timeoutSeconds,
-            onValueChange = { if (it.isEmpty() || it.all { char -> char.isDigit() }) timeoutSeconds = it },
-            label = { Text("Connection Timeout (Seconds) - e.g. 5") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.fillMaxWidth()
-        )
-        
-        Spacer(modifier = Modifier.height(24.dp))
-        
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-            Button(
-                onClick = {
-                    val finalInterval = intervalValue.toLongOrNull() ?: 1L
-                    val finalTimeout = timeoutSeconds.toLongOrNull() ?: 5L
-                    prefs.edit()
-                        .putString(LinkCheckerService.KEY_PLAYLIST_URL, url)
-                        .putLong(LinkCheckerService.KEY_INTERVAL_VALUE, finalInterval)
-                        .putString(LinkCheckerService.KEY_INTERVAL_UNIT, intervalUnit)
-                        .putLong(LinkCheckerService.KEY_TIMEOUT_SECONDS, finalTimeout)
-                        .apply()
-                    
-                    val serviceIntent = Intent(context, LinkCheckerService::class.java)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        context.startForegroundService(serviceIntent)
-                    } else {
-                        context.startService(serviceIntent)
+        item {
+            Card(modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    when (sourceType) {
+                        "M3U" -> {
+                            OutlinedTextField(
+                                value = url,
+                                onValueChange = { url = it },
+                                label = { Text("IPTV Playlist URL (.m3u, .m3u8)") },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                        "XTREAM" -> {
+                            OutlinedTextField(
+                                value = xtreamServer,
+                                onValueChange = { xtreamServer = it },
+                                label = { Text("Server URL (http://example.com:8080)") },
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                            )
+                            OutlinedTextField(
+                                value = xtreamUser,
+                                onValueChange = { xtreamUser = it },
+                                label = { Text("Username") },
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                            )
+                            OutlinedTextField(
+                                value = xtreamPass,
+                                onValueChange = { xtreamPass = it },
+                                label = { Text("Password") },
+                                visualTransformation = PasswordVisualTransformation(),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                        "MAC" -> {
+                            OutlinedTextField(
+                                value = macServer,
+                                onValueChange = { macServer = it },
+                                label = { Text("Portal URL (http://example.com:8080)") },
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                            )
+                            OutlinedTextField(
+                                value = macAddress,
+                                onValueChange = { macAddress = it },
+                                label = { Text("MAC Address (00:1A:79:...)") },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
                     }
-                    serviceStarted = true
-                },
-                modifier = Modifier.padding(16.dp)
-            ) {
-                Text("Save & Start Service")
+                }
+            }
+        }
+
+        item {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = intervalValue,
+                    onValueChange = { if (it.isEmpty() || it.all { char -> char.isDigit() }) intervalValue = it },
+                    label = { Text("Update Interval") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f)
+                )
+
+                Spacer(modifier = Modifier.width(16.dp))
+
+                Row {
+                    Button(
+                        onClick = { intervalUnit = "MINUTES" },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (intervalUnit == "MINUTES") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = if (intervalUnit == "MINUTES") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    ) {
+                        Text("Minutes")
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = { intervalUnit = "HOURS" },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (intervalUnit == "HOURS") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = if (intervalUnit == "HOURS") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    ) {
+                        Text("Hours")
+                    }
+                }
             }
 
-            if (serviceStarted || prefs.getString(LinkCheckerService.KEY_PLAYLIST_URL, "")?.isNotEmpty() == true) {
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            OutlinedTextField(
+                value = timeoutSeconds,
+                onValueChange = { if (it.isEmpty() || it.all { char -> char.isDigit() }) timeoutSeconds = it },
+                label = { Text("Connection Timeout (Seconds)") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth()
+            )
+            
+            Spacer(modifier = Modifier.height(24.dp))
+        }
+        
+        item {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
                 Button(
                     onClick = {
-                        val serviceIntent = Intent(context, LinkCheckerService::class.java).apply {
-                            action = LinkCheckerService.ACTION_FORCE_REFRESH
-                        }
+                        val finalInterval = intervalValue.toLongOrNull() ?: 1L
+                        val finalTimeout = timeoutSeconds.toLongOrNull() ?: 5L
+                        prefs.edit()
+                            .putString(LinkCheckerService.KEY_SOURCE_TYPE, sourceType)
+                            .putString(LinkCheckerService.KEY_PLAYLIST_URL, url)
+                            .putString(LinkCheckerService.KEY_XTREAM_SERVER, xtreamServer)
+                            .putString(LinkCheckerService.KEY_XTREAM_USER, xtreamUser)
+                            .putString(LinkCheckerService.KEY_XTREAM_PASS, xtreamPass)
+                            .putString(LinkCheckerService.KEY_MAC_SERVER, macServer)
+                            .putString(LinkCheckerService.KEY_MAC_ADDRESS, macAddress)
+                            .putLong(LinkCheckerService.KEY_INTERVAL_VALUE, finalInterval)
+                            .putString(LinkCheckerService.KEY_INTERVAL_UNIT, intervalUnit)
+                            .putLong(LinkCheckerService.KEY_TIMEOUT_SECONDS, finalTimeout)
+                            .apply()
+                        
+                        val serviceIntent = Intent(context, LinkCheckerService::class.java)
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                             context.startForegroundService(serviceIntent)
                         } else {
                             context.startService(serviceIntent)
                         }
+                        serviceStarted = true
                     },
-                    modifier = Modifier.padding(16.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                    modifier = Modifier.padding(16.dp)
                 ) {
-                    Text("Force Check Now")
+                    Text("Save & Start Service")
+                }
+
+                if (serviceStarted || prefs.getString(LinkCheckerService.KEY_SOURCE_TYPE, "")?.isNotEmpty() == true) {
+                    Button(
+                        onClick = {
+                            val serviceIntent = Intent(context, LinkCheckerService::class.java).apply {
+                                action = LinkCheckerService.ACTION_FORCE_REFRESH
+                            }
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                context.startForegroundService(serviceIntent)
+                            } else {
+                                context.startService(serviceIntent)
+                            }
+                        },
+                        modifier = Modifier.padding(16.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                    ) {
+                        Text("Force Check Now")
+                    }
                 }
             }
         }
         
-        if (serviceStarted || prefs.getString(LinkCheckerService.KEY_PLAYLIST_URL, "")?.isNotEmpty() == true) {
-            Spacer(modifier = Modifier.height(16.dp))
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
-                ),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Dashboard", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    
-                    val dateStr = if (lastCheckTime > 0) SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(lastCheckTime)) else "Never"
-                    
-                    Text("Last Checked: $dateStr")
-                    Text("Total Links Found: $totalLinks")
-                    Text("Alive Links: $aliveLinks", color = androidx.compose.ui.graphics.Color(0xFF4CAF50))
-                    Text("Dead Links Removed: $deadLinks", color = MaterialTheme.colorScheme.error)
-                    
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text("Point your IPTV Player (like TiviMate) to:")
-                    Text(
-                        text = "http://localhost:8080/playlist.m3u",
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
+        item {
+            if (serviceStarted || prefs.getString(LinkCheckerService.KEY_SOURCE_TYPE, "")?.isNotEmpty() == true) {
+                Spacer(modifier = Modifier.height(16.dp))
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    ),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 32.dp)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("Dashboard", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        
+                        val dateStr = if (lastCheckTime > 0) SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(lastCheckTime)) else "Never"
+                        
+                        Text("Last Checked: $dateStr")
+                        Text("Total Links Found: $totalLinks")
+                        Text("Alive Links: $aliveLinks", color = androidx.compose.ui.graphics.Color(0xFF4CAF50))
+                        Text("Dead Links Removed: $deadLinks", color = MaterialTheme.colorScheme.error)
+                        
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text("Point your IPTV Player (like TiviMate) to:")
+                        Text(
+                            text = "http://localhost:8080/playlist.m3u",
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
                 }
             }
         }
