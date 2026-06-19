@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Build
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -18,18 +19,28 @@ import com.example.auto_dead_link_remover.LinkCheckerService
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * Main configuration screen optimized for Android TV with D-pad navigation.
+ *
+ * Key optimization: Instead of registering a SharedPreferences listener (which fires
+ * per-key and triggers individual recompositions for each change), we use a single
+ * polling LaunchedEffect that reads ALL dashboard values once every 2 seconds.
+ * This batches all UI updates into a single recomposition pass.
+ */
 @Composable
 fun MainScreen(
     onItemClick: (NavKey) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val prefs = context.getSharedPreferences(LinkCheckerService.PREFS_NAME, Context.MODE_PRIVATE)
-    
+    val prefs = remember { context.getSharedPreferences(LinkCheckerService.PREFS_NAME, Context.MODE_PRIVATE) }
+
+    // --- Form state (read once on composition, written on save) ---
     var sourceType by remember { mutableStateOf(prefs.getString(LinkCheckerService.KEY_SOURCE_TYPE, "M3U") ?: "M3U") }
     var url by remember { mutableStateOf(prefs.getString(LinkCheckerService.KEY_PLAYLIST_URL, "") ?: "") }
     var xtreamServer by remember { mutableStateOf(prefs.getString(LinkCheckerService.KEY_XTREAM_SERVER, "") ?: "") }
@@ -41,29 +52,36 @@ fun MainScreen(
     var intervalValue by remember { mutableStateOf(prefs.getLong(LinkCheckerService.KEY_INTERVAL_VALUE, 1L).toString()) }
     var intervalUnit by remember { mutableStateOf(prefs.getString(LinkCheckerService.KEY_INTERVAL_UNIT, "HOURS") ?: "HOURS") }
     var timeoutSeconds by remember { mutableStateOf(prefs.getLong(LinkCheckerService.KEY_TIMEOUT_SECONDS, 5L).toString()) }
-    var concurrentLinks by remember { mutableStateOf(prefs.getInt(LinkCheckerService.KEY_CONCURRENT_LINKS, 50).toString()) }
+    var concurrentLinks by remember { mutableStateOf(prefs.getInt(LinkCheckerService.KEY_CONCURRENT_LINKS, 20).toString()) }
     var serviceStarted by remember { mutableStateOf(false) }
 
+    // --- Dashboard state (polled every 2 seconds instead of listener-driven) ---
     var lastCheckTime by remember { mutableStateOf(prefs.getLong("last_check_time", 0L)) }
     var totalLinks by remember { mutableStateOf(prefs.getInt("total_links", 0)) }
     var aliveLinks by remember { mutableStateOf(prefs.getInt("alive_links", 0)) }
     var deadLinks by remember { mutableStateOf(prefs.getInt("dead_links", 0)) }
+    var scanInProgress by remember { mutableStateOf(prefs.getBoolean("scan_in_progress", false)) }
 
-    val listener = remember {
-        android.content.SharedPreferences.OnSharedPreferenceChangeListener { sharedPreferences, key ->
-            when (key) {
-                "last_check_time" -> lastCheckTime = sharedPreferences.getLong(key, 0L)
-                "total_links" -> totalLinks = sharedPreferences.getInt(key, 0)
-                "alive_links" -> aliveLinks = sharedPreferences.getInt(key, 0)
-                "dead_links" -> deadLinks = sharedPreferences.getInt(key, 0)
-            }
+    // Poll dashboard values every 2 seconds — ONE recomposition per cycle
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(2000)
+            lastCheckTime = prefs.getLong("last_check_time", 0L)
+            totalLinks = prefs.getInt("total_links", 0)
+            aliveLinks = prefs.getInt("alive_links", 0)
+            deadLinks = prefs.getInt("dead_links", 0)
+            scanInProgress = prefs.getBoolean("scan_in_progress", false)
         }
     }
 
-    DisposableEffect(prefs) {
-        prefs.registerOnSharedPreferenceChangeListener(listener)
-        onDispose {
-            prefs.unregisterOnSharedPreferenceChangeListener(listener)
+    // Stabilize lambdas to prevent recomposition from recreating them
+    val startService = remember(context) {
+        { intent: Intent ->
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
         }
     }
 
@@ -74,34 +92,51 @@ fun MainScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Top
     ) {
-        item {
+        // Title
+        item(key = "title") {
             Text(
-                text = "Auto Dead Link Remover",
+                text = "⚡ Auto Dead Link Remover",
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(bottom = 24.dp)
             )
         }
 
-        item {
-            Row(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp), horizontalArrangement = Arrangement.Center) {
+        // Source type selector
+        item(key = "source_selector") {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                horizontalArrangement = Arrangement.Center
+            ) {
                 listOf("M3U", "XTREAM", "MAC").forEach { type ->
+                    val isSelected = sourceType == type
                     Button(
                         onClick = { sourceType = type },
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (sourceType == type) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                            contentColor = if (sourceType == type) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                            containerColor = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
                         ),
+                        shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.padding(horizontal = 4.dp)
                     ) {
-                        Text(if (type == "M3U") "M3U / M3U8" else if (type == "XTREAM") "Xtream Codes" else "MAC / Stalker")
+                        Text(
+                            when (type) {
+                                "M3U" -> "M3U / M3U8"
+                                "XTREAM" -> "Xtream Codes"
+                                else -> "MAC / Stalker"
+                            }
+                        )
                     }
                 }
             }
         }
 
-        item {
-            Card(modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+        // Source configuration card
+        item(key = "source_config") {
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp),
+                shape = RoundedCornerShape(12.dp)
+            ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     when (sourceType) {
                         "M3U" -> {
@@ -154,11 +189,12 @@ fun MainScreen(
             }
         }
 
-        item {
+        // Settings row
+        item(key = "settings") {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = intervalValue,
-                    onValueChange = { if (it.isEmpty() || it.all { char -> char.isDigit() }) intervalValue = it },
+                    onValueChange = { if (it.isEmpty() || it.all { c -> c.isDigit() }) intervalValue = it },
                     label = { Text("Update Interval") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.weight(1f)
@@ -167,60 +203,55 @@ fun MainScreen(
                 Spacer(modifier = Modifier.width(16.dp))
 
                 Row {
-                    Button(
-                        onClick = { intervalUnit = "MINUTES" },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (intervalUnit == "MINUTES") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                            contentColor = if (intervalUnit == "MINUTES") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    ) {
-                        Text("Minutes")
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Button(
-                        onClick = { intervalUnit = "HOURS" },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (intervalUnit == "HOURS") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                            contentColor = if (intervalUnit == "HOURS") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    ) {
-                        Text("Hours")
+                    listOf("MINUTES" to "Min", "HOURS" to "Hr").forEach { (unit, label) ->
+                        Button(
+                            onClick = { intervalUnit = unit },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (intervalUnit == unit) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                contentColor = if (intervalUnit == unit) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                            ),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(label)
+                        }
+                        if (unit == "MINUTES") Spacer(modifier = Modifier.width(8.dp))
                     }
                 }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
-            
+
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = timeoutSeconds,
-                    onValueChange = { if (it.isEmpty() || it.all { char -> char.isDigit() }) timeoutSeconds = it },
-                    label = { Text("Connection Timeout (Seconds)") },
+                    onValueChange = { if (it.isEmpty() || it.all { c -> c.isDigit() }) timeoutSeconds = it },
+                    label = { Text("Timeout (sec)") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.weight(1f)
                 )
-                
+
                 Spacer(modifier = Modifier.width(16.dp))
-                
+
                 OutlinedTextField(
                     value = concurrentLinks,
-                    onValueChange = { if (it.isEmpty() || it.all { char -> char.isDigit() }) concurrentLinks = it },
-                    label = { Text("Max Concurrent Scans") },
+                    onValueChange = { if (it.isEmpty() || it.all { c -> c.isDigit() }) concurrentLinks = it },
+                    label = { Text("Max Parallel Scans") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.weight(1f)
                 )
             }
-            
+
             Spacer(modifier = Modifier.height(24.dp))
         }
-        
-        item {
+
+        // Action buttons
+        item(key = "actions") {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
                 Button(
                     onClick = {
                         val finalInterval = intervalValue.toLongOrNull() ?: 1L
                         val finalTimeout = timeoutSeconds.toLongOrNull() ?: 5L
-                        val finalConcurrent = concurrentLinks.toIntOrNull() ?: 50
+                        val finalConcurrent = (concurrentLinks.toIntOrNull() ?: 20).coerceIn(1, 200)
                         prefs.edit()
                             .putString(LinkCheckerService.KEY_SOURCE_TYPE, sourceType)
                             .putString(LinkCheckerService.KEY_PLAYLIST_URL, url)
@@ -234,18 +265,14 @@ fun MainScreen(
                             .putLong(LinkCheckerService.KEY_TIMEOUT_SECONDS, finalTimeout)
                             .putInt(LinkCheckerService.KEY_CONCURRENT_LINKS, finalConcurrent)
                             .apply()
-                        
-                        val serviceIntent = Intent(context, LinkCheckerService::class.java)
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            context.startForegroundService(serviceIntent)
-                        } else {
-                            context.startService(serviceIntent)
-                        }
+
+                        startService(Intent(context, LinkCheckerService::class.java))
                         serviceStarted = true
                     },
+                    shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.padding(16.dp)
                 ) {
-                    Text("Save & Start Service")
+                    Text("💾 Save & Start Service")
                 }
 
                 if (serviceStarted || prefs.getString(LinkCheckerService.KEY_SOURCE_TYPE, "")?.isNotEmpty() == true) {
@@ -254,42 +281,90 @@ fun MainScreen(
                             val serviceIntent = Intent(context, LinkCheckerService::class.java).apply {
                                 action = LinkCheckerService.ACTION_FORCE_REFRESH
                             }
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                context.startForegroundService(serviceIntent)
-                            } else {
-                                context.startService(serviceIntent)
-                            }
+                            startService(serviceIntent)
                         },
+                        shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.padding(16.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
                     ) {
-                        Text("Force Check Now")
+                        Text("🔄 Force Check Now")
                     }
                 }
             }
         }
-        
-        item {
-            if (serviceStarted || prefs.getString(LinkCheckerService.KEY_SOURCE_TYPE, "")?.isNotEmpty() == true) {
+
+        // Dashboard
+        item(key = "dashboard") {
+            if (serviceStarted || totalLinks > 0 || lastCheckTime > 0L) {
                 Spacer(modifier = Modifier.height(16.dp))
                 Card(
                     colors = CardDefaults.cardColors(
                         containerColor = MaterialTheme.colorScheme.primaryContainer
                     ),
+                    shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth().padding(bottom = 32.dp)
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
-                        Text("Dashboard", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        
-                        val dateStr = if (lastCheckTime > 0) SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(lastCheckTime)) else "Never"
-                        
-                        Text("Last Checked: $dateStr")
-                        Text("Total Links Found: $totalLinks")
-                        Text("Alive Links: $aliveLinks", color = androidx.compose.ui.graphics.Color(0xFF4CAF50))
-                        Text("Dead Links Removed: $deadLinks", color = MaterialTheme.colorScheme.error)
-                        
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "📊 Dashboard",
+                                fontWeight = FontWeight.Bold,
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            if (scanInProgress) {
+                                Spacer(modifier = Modifier.width(12.dp))
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    "Scanning...",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        val dateStr = if (lastCheckTime > 0) {
+                            SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(lastCheckTime))
+                        } else "Never"
+
+                        Text("🕐 Last Checked: $dateStr")
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("📋 Total Links Found: $totalLinks")
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        val processed = aliveLinks + deadLinks
+                        if (scanInProgress && totalLinks > 0) {
+                            val progress = processed.toFloat() / totalLinks.toFloat()
+                            LinearProgressIndicator(
+                                progress = { progress },
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+                            )
+                            Text(
+                                "Progress: $processed / $totalLinks (${(progress * 100).toInt()}%)",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+
+                        Text(
+                            "✅ Alive Links: $aliveLinks",
+                            color = androidx.compose.ui.graphics.Color(0xFF4CAF50)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "❌ Dead Links Removed: $deadLinks",
+                            color = MaterialTheme.colorScheme.error
+                        )
+
                         Spacer(modifier = Modifier.height(16.dp))
+                        HorizontalDivider()
+                        Spacer(modifier = Modifier.height(12.dp))
                         Text("Point your IPTV Player (like TiviMate) to:")
                         Text(
                             text = "http://localhost:8080/playlist.m3u",
