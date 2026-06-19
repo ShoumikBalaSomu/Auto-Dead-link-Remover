@@ -12,37 +12,58 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.io.BufferedWriter
 import java.io.File
 import java.io.FileWriter
+import java.net.InetAddress
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * High-performance playlist manager optimized for low-memory Android TV devices (2GB RAM).
  *
  * Key design decisions:
- * - Singleton OkHttpClient: avoids connection pool leaks across scan cycles.
- * - Channel-based worker pool: caps actual concurrent coroutines to N instead of spawning
- *   thousands of Deferred objects.
- * - Stream-to-disk output: writes alive links directly to a temp file via BufferedWriter
- *   instead of accumulating them all in a List<String> and then joinToString.
- * - Throttled progress updates: SharedPreferences written at most once per 2 seconds
- *   to avoid triggering cascading Compose recompositions.
+ * - Singleton OkHttpClient with in-memory DNS cache to avoid repeated DNS lookups.
+ * - Channel-based worker pool: caps actual concurrent coroutines to N.
+ * - Stream-to-disk output: writes alive links directly via BufferedWriter.
+ * - Throttled progress updates with scan speed (links/sec) and ETA.
+ * - Smart retry: links that fail on HEAD get a single GET retry before marking dead.
  */
 class PlaylistManager(private val context: Context) {
 
     companion object {
         private const val TAG = "PlaylistManager"
 
-        // Singleton HTTP client — reused across ALL scan cycles.
-        // Connection pool and dispatcher are configured once.
         @Volatile
         private var httpClient: OkHttpClient? = null
         private val clientLock = Any()
+
+        /**
+         * In-memory DNS cache — avoids repeated system DNS lookups for the same hosts.
+         * Critical for IPTV playlists where thousands of links share a handful of domains.
+         * Entries expire after 10 minutes.
+         */
+        private val dnsCache = ConcurrentHashMap<String, Pair<List<InetAddress>, Long>>()
+        private const val DNS_TTL_MS = 10 * 60 * 1000L // 10 minutes
+
+        private val cachedDns = object : Dns {
+            override fun lookup(hostname: String): List<InetAddress> {
+                val now = System.currentTimeMillis()
+                val cached = dnsCache[hostname]
+                if (cached != null && (now - cached.second) < DNS_TTL_MS) {
+                    return cached.first
+                }
+                val addresses = Dns.SYSTEM.lookup(hostname)
+                dnsCache[hostname] = addresses to now
+                return addresses
+            }
+        }
 
         fun getClient(timeoutSeconds: Long, maxConcurrent: Int): OkHttpClient {
             return httpClient ?: synchronized(clientLock) {
@@ -55,7 +76,8 @@ class PlaylistManager(private val context: Context) {
                         maxRequests = maxConcurrent
                         maxRequestsPerHost = maxConcurrent
                     })
-                    .retryOnConnectionFailure(false) // Don't waste time retrying dead links
+                    .dns(cachedDns)
+                    .retryOnConnectionFailure(false)
                     .followRedirects(true)
                     .followSslRedirects(true)
                     .build()
@@ -63,12 +85,12 @@ class PlaylistManager(private val context: Context) {
             }
         }
 
-        /** Reconfigure client if user changes timeout/concurrency settings. */
         fun resetClient() {
             synchronized(clientLock) {
                 httpClient?.dispatcher?.executorService?.shutdown()
                 httpClient?.connectionPool?.evictAll()
                 httpClient = null
+                dnsCache.clear()
             }
         }
     }
@@ -81,14 +103,13 @@ class PlaylistManager(private val context: Context) {
     suspend fun processPlaylist(timeoutSeconds: Long) = withContext(Dispatchers.IO) {
         val prefs = context.getSharedPreferences("iptv_prefs", Context.MODE_PRIVATE)
         val concurrentLinks = prefs.getInt("concurrent_links", 20).coerceIn(1, 200)
+        val retryEnabled = prefs.getBoolean("retry_failed", true)
         val client = getClient(timeoutSeconds, concurrentLinks)
 
         val sourceType = prefs.getString("source_type", "M3U") ?: "M3U"
 
-        // Phase 1: Parse playlist into items to test.
-        // Header lines (like #EXTM3U) go directly to the output file.
         val headerLines = mutableListOf<String>()
-        val itemsToTest = ArrayList<PlaylistItem>(4096) // pre-size to avoid resizing
+        val itemsToTest = ArrayList<PlaylistItem>(4096)
 
         try {
             when (sourceType) {
@@ -104,32 +125,47 @@ class PlaylistManager(private val context: Context) {
             val totalLinks = itemsToTest.size
             val aliveCount = AtomicInteger(0)
             val deadCount = AtomicInteger(0)
+            val scanStartTime = AtomicLong(System.currentTimeMillis())
 
-            Log.i(TAG, "Starting scan: $totalLinks links, concurrency=$concurrentLinks, timeout=${timeoutSeconds}s")
+            Log.i(TAG, "Starting scan: $totalLinks links, concurrency=$concurrentLinks, timeout=${timeoutSeconds}s, retry=$retryEnabled")
 
             prefs.edit()
                 .putInt("total_links", totalLinks)
                 .putInt("alive_links", 0)
                 .putInt("dead_links", 0)
                 .putBoolean("scan_in_progress", true)
+                .putLong("scan_start_time", scanStartTime.get())
+                .putFloat("scan_speed", 0f)
+                .putString("scan_eta", "Calculating...")
                 .apply()
 
-            // Phase 2: Check links using a bounded worker pool via Channel.
-            // This is THE key optimization: instead of creating N coroutines with async{},
-            // we create exactly `concurrentLinks` workers that pull from a shared channel.
-            // Memory stays flat regardless of playlist size.
             val aliveItems = java.util.concurrent.ConcurrentLinkedQueue<PlaylistItem>()
 
             coroutineScope {
                 val channel = Channel<PlaylistItem>(capacity = Channel.BUFFERED)
 
-                // Throttled progress reporter — updates prefs at most every 2 seconds
+                // Throttled progress reporter with speed & ETA
                 val progressJob = launch {
                     while (isActive) {
                         delay(2000)
+                        val processed = aliveCount.get() + deadCount.get()
+                        val elapsed = (System.currentTimeMillis() - scanStartTime.get()) / 1000.0
+                        val speed = if (elapsed > 0) processed / elapsed else 0.0
+                        val remaining = totalLinks - processed
+                        val etaSeconds = if (speed > 0) (remaining / speed).toLong() else 0L
+
+                        val etaStr = when {
+                            processed >= totalLinks -> "Complete"
+                            etaSeconds < 60 -> "${etaSeconds}s remaining"
+                            etaSeconds < 3600 -> "${etaSeconds / 60}m ${etaSeconds % 60}s remaining"
+                            else -> "${etaSeconds / 3600}h ${(etaSeconds % 3600) / 60}m remaining"
+                        }
+
                         prefs.edit()
                             .putInt("alive_links", aliveCount.get())
                             .putInt("dead_links", deadCount.get())
+                            .putFloat("scan_speed", speed.toFloat())
+                            .putString("scan_eta", etaStr)
                             .apply()
                     }
                 }
@@ -138,9 +174,19 @@ class PlaylistManager(private val context: Context) {
                 val workers = List(concurrentLinks) {
                     launch {
                         for (item in channel) {
-                            if (isLinkAlive(item.url, client)) {
+                            val alive = isLinkAlive(item.url, client)
+                            if (alive) {
                                 aliveCount.incrementAndGet()
                                 aliveItems.add(item)
+                            } else if (retryEnabled) {
+                                // Smart retry: try GET instead of HEAD (some servers reject HEAD)
+                                val retryAlive = isLinkAliveGet(item.url, client)
+                                if (retryAlive) {
+                                    aliveCount.incrementAndGet()
+                                    aliveItems.add(item)
+                                } else {
+                                    deadCount.incrementAndGet()
+                                }
                             } else {
                                 deadCount.incrementAndGet()
                             }
@@ -148,32 +194,27 @@ class PlaylistManager(private val context: Context) {
                     }
                 }
 
-                // Feed items into the channel (this is the producer)
+                // Producer
                 launch {
                     for (item in itemsToTest) {
                         channel.send(item)
                     }
-                    channel.close() // Signal workers to finish
+                    channel.close()
                 }
 
-                // Wait for all workers to complete
                 workers.forEach { it.join() }
                 progressJob.cancel()
             }
 
-            // Phase 3: Write clean playlist directly to disk via BufferedWriter.
-            // No intermediate String or List — pure streaming I/O.
+            // Write clean playlist to disk
             val tempFile = File(context.filesDir, "clean_playlist.m3u.tmp")
             val outFile = getCleanPlaylistFile()
 
             BufferedWriter(FileWriter(tempFile), 8192).use { writer ->
-                // Write header lines
                 for (header in headerLines) {
                     writer.write(header)
                     writer.newLine()
                 }
-
-                // Write alive items — order doesn't matter for IPTV players
                 for (item in aliveItems) {
                     item.extInf?.let {
                         writer.write(it)
@@ -184,27 +225,35 @@ class PlaylistManager(private val context: Context) {
                 }
             }
 
-            // Atomic rename: prevents serving a half-written file
             tempFile.renameTo(outFile)
 
-            // Final progress update
+            // Final stats
             val finalAlive = aliveCount.get()
             val finalDead = deadCount.get()
+            val elapsed = (System.currentTimeMillis() - scanStartTime.get()) / 1000.0
+            val finalSpeed = if (elapsed > 0) totalLinks / elapsed else 0.0
+
             prefs.edit()
                 .putInt("alive_links", finalAlive)
                 .putInt("dead_links", finalDead)
                 .putLong("last_check_time", System.currentTimeMillis())
                 .putBoolean("scan_in_progress", false)
+                .putFloat("scan_speed", finalSpeed.toFloat())
+                .putString("scan_eta", "Complete")
+                .putLong("last_scan_duration", (elapsed * 1000).toLong())
+                .putLong("playlist_file_size", outFile.length())
                 .apply()
 
-            Log.i(TAG, "Scan complete: $finalAlive alive, $finalDead dead out of $totalLinks total")
+            Log.i(TAG, "Scan complete: $finalAlive alive, $finalDead dead, ${elapsed.toLong()}s elapsed, ${String.format("%.1f", finalSpeed)} links/sec")
 
-            // Help GC reclaim the items list immediately
             itemsToTest.clear()
 
         } catch (e: Exception) {
             Log.e(TAG, "Error processing playlist", e)
-            prefs.edit().putBoolean("scan_in_progress", false).apply()
+            prefs.edit()
+                .putBoolean("scan_in_progress", false)
+                .putString("scan_eta", "Error: ${e.message}")
+                .apply()
         }
     }
 
@@ -246,7 +295,6 @@ class PlaylistManager(private val context: Context) {
                     continue
                 }
 
-                // Stream-parse: never load the full body into memory
                 response.body?.charStream()?.buffered(16384)?.useLines { lines ->
                     var currentExtInf: String? = null
 
@@ -269,7 +317,6 @@ class PlaylistManager(private val context: Context) {
                                 currentExtInf = null
                             }
                             else -> {
-                                // Other comment/directive lines — keep unique ones
                                 if (!headerLines.contains(trimmed)) {
                                     headerLines.add(trimmed)
                                 }
@@ -292,7 +339,6 @@ class PlaylistManager(private val context: Context) {
         val server = normalizeUrl(prefs.getString("mac_server", "") ?: "")
         val mac = prefs.getString("mac_address", "") ?: ""
 
-        // Step 1: Handshake to get auth token
         val handshakeUrl = "$server/portal.php?type=stb&action=handshake&token=&JsHttpRequest=1-xml"
         val handshakeReq = Request.Builder()
             .url(handshakeUrl)
@@ -312,7 +358,6 @@ class PlaylistManager(private val context: Context) {
 
         if (token.isEmpty()) return
 
-        // Step 2: Fetch all channels
         val channelsUrl = "$server/portal.php?type=itv&action=get_all_channels&JsHttpRequest=1-xml"
         val channelsReq = Request.Builder()
             .url(channelsUrl)
@@ -347,20 +392,30 @@ class PlaylistManager(private val context: Context) {
         }
     }
 
-    /**
-     * Fast link-alive check using HTTP HEAD with minimal overhead.
-     * Closes the response body immediately to free the connection back to the pool.
-     */
+    /** Fast HEAD-based link check */
     private fun isLinkAlive(url: String, client: OkHttpClient): Boolean {
         return try {
-            val request = Request.Builder()
-                .url(url)
-                .head()
-                .build()
+            val request = Request.Builder().url(url).head().build()
             val response = client.newCall(request).execute()
             val code = response.code
             response.close()
             code in 200..399 || code == 405
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** Fallback GET-based check for servers that reject HEAD requests */
+    private fun isLinkAliveGet(url: String, client: OkHttpClient): Boolean {
+        return try {
+            val request = Request.Builder()
+                .url(url)
+                .header("Range", "bytes=0-0") // Request only 1 byte to save bandwidth
+                .build()
+            val response = client.newCall(request).execute()
+            val code = response.code
+            response.close()
+            code in 200..399 || code == 405 || code == 416 // 416 = Range Not Satisfiable = server is alive
         } catch (_: Exception) {
             false
         }
