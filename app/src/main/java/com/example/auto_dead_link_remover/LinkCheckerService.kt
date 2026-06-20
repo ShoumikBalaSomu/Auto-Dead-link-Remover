@@ -3,6 +3,7 @@ package com.example.auto_dead_link_remover
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -23,6 +24,7 @@ class LinkCheckerService : Service() {
     private lateinit var playlistManager: PlaylistManager
     private var localServer: LocalIptvServer? = null
     private var checkJob: Job? = null
+    private var notificationProgressJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
     companion object {
@@ -51,20 +53,16 @@ class LinkCheckerService : Service() {
         playlistManager = PlaylistManager(this)
         
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, createNotification("Initializing..."))
+        startForeground(NOTIFICATION_ID, createNotification("Initializing...", indeterminate = true))
 
         PlaylistManager.resetClient()
 
-        // Acquire a partial wake lock to prevent the TV from sleeping during scans
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
             "AutoDeadLinkRemover::ScanWakeLock"
-        ).apply {
-            setReferenceCounted(false)
-        }
+        ).apply { setReferenceCounted(false) }
 
-        // Start NanoHTTPD Server
         try {
             localServer = LocalIptvServer(8080, playlistManager.getCleanPlaylistFile())
             localServer?.start()
@@ -75,9 +73,8 @@ class LinkCheckerService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Handle stop action
         if (intent?.action == ACTION_STOP_SERVICE) {
-            Log.i(TAG, "Stop action received, stopping service")
+            Log.i(TAG, "Stop action received")
             val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit()
                 .putBoolean("service_running", false)
@@ -93,18 +90,16 @@ class LinkCheckerService : Service() {
         val intervalUnit = prefs.getString(KEY_INTERVAL_UNIT, "HOURS")
         val timeoutSeconds = prefs.getLong(KEY_TIMEOUT_SECONDS, 5L)
 
-        // Mark service as running
         prefs.edit().putBoolean("service_running", true).apply()
-
         PlaylistManager.resetClient()
 
         if (intent?.action == ACTION_FORCE_REFRESH) {
             serviceScope.launch {
-                Log.i(TAG, "Force refreshing playlist")
                 acquireWakeLock()
-                updateNotification("Scanning links...")
+                startNotificationProgress()
                 playlistManager.processPlaylist(timeoutSeconds)
-                updateNotification("Running on port 8080")
+                stopNotificationProgress()
+                updateNotification("✅ Scan complete • Serving on :8080")
                 releaseWakeLock()
             }
             return START_STICKY
@@ -120,17 +115,56 @@ class LinkCheckerService : Service() {
 
         checkJob = serviceScope.launch {
             while (isActive) {
-                Log.i(TAG, "Starting scheduled link check cycle")
                 acquireWakeLock()
-                updateNotification("Scanning links...")
+                startNotificationProgress()
                 playlistManager.processPlaylist(timeoutSeconds)
+                stopNotificationProgress()
+                updateNotification("✅ Running • Next scan in ${intervalValue}${if (intervalUnit == "MINUTES") "m" else "h"}")
                 releaseWakeLock()
-                updateNotification("Running on port 8080 • Next scan in ${intervalValue}${if (intervalUnit == "MINUTES") "m" else "h"}")
                 delay(delayMs)
             }
         }
 
         return START_STICKY
+    }
+
+    /**
+     * Starts a coroutine that updates the notification with real-time scan progress.
+     * Shows a progress bar in the phone's notification shade.
+     */
+    private fun startNotificationProgress() {
+        stopNotificationProgress()
+        notificationProgressJob = serviceScope.launch {
+            while (isActive) {
+                delay(3000)
+                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                val total = prefs.getInt("total_links", 0)
+                val alive = prefs.getInt("alive_links", 0)
+                val dead = prefs.getInt("dead_links", 0)
+                val speed = prefs.getFloat("scan_speed", 0f)
+                val scanning = prefs.getBoolean("scan_in_progress", false)
+
+                if (!scanning) break
+
+                val processed = alive + dead
+                if (total > 0) {
+                    val percent = (processed * 100) / total
+                    updateNotificationWithProgress(
+                        "Scanning: $processed/$total ($percent%)",
+                        "⚡ ${String.format("%.1f", speed)}/sec • ✅$alive ❌$dead",
+                        processed,
+                        total
+                    )
+                } else {
+                    updateNotification("Downloading playlist...")
+                }
+            }
+        }
+    }
+
+    private fun stopNotificationProgress() {
+        notificationProgressJob?.cancel()
+        notificationProgressJob = null
     }
 
     override fun onDestroy() {
@@ -146,56 +180,69 @@ class LinkCheckerService : Service() {
             .putBoolean("scan_in_progress", false)
             .apply()
         
-        Log.i(TAG, "Service destroyed, server stopped, client released")
+        Log.i(TAG, "Service destroyed")
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun acquireWakeLock() {
-        wakeLock?.let {
-            if (!it.isHeld) {
-                it.acquire(30 * 60 * 1000L) // Max 30 minutes per scan
-                Log.d(TAG, "Wake lock acquired")
-            }
-        }
+        wakeLock?.let { if (!it.isHeld) it.acquire(30 * 60 * 1000L) }
     }
 
     private fun releaseWakeLock() {
-        wakeLock?.let {
-            if (it.isHeld) {
-                it.release()
-                Log.d(TAG, "Wake lock released")
-            }
-        }
+        wakeLock?.let { if (it.isHeld) it.release() }
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val serviceChannel = NotificationChannel(
                 CHANNEL_ID,
-                "Auto Dead Link Remover Service",
+                "Dead Link Remover",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "Background service for IPTV playlist cleaning"
                 setShowBadge(false)
             }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(serviceChannel)
+            getSystemService(NotificationManager::class.java)?.createNotificationChannel(serviceChannel)
         }
     }
 
-    private fun createNotification(text: String): Notification {
+    private fun getBaseNotificationBuilder(text: String): NotificationCompat.Builder {
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0, openIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Auto Dead Link Remover")
+            .setContentTitle("⚡ Dead Link Remover")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
             .setSilent(true)
-            .build()
+            .setContentIntent(pendingIntent)
+    }
+
+    private fun createNotification(text: String, indeterminate: Boolean = false): Notification {
+        val builder = getBaseNotificationBuilder(text)
+        if (indeterminate) {
+            builder.setProgress(0, 0, true)
+        }
+        return builder.build()
     }
 
     private fun updateNotification(text: String) {
-        val manager = getSystemService(NotificationManager::class.java)
-        manager?.notify(NOTIFICATION_ID, createNotification(text))
+        getSystemService(NotificationManager::class.java)
+            ?.notify(NOTIFICATION_ID, createNotification(text))
+    }
+
+    private fun updateNotificationWithProgress(title: String, subtitle: String, current: Int, total: Int) {
+        val notification = getBaseNotificationBuilder(title)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(subtitle))
+            .setProgress(total, current, false)
+            .build()
+        getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, notification)
     }
 }
