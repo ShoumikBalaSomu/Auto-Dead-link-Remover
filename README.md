@@ -1,5 +1,7 @@
 # Auto-Dead-link-Remover
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ShoumikBalaSomu/Auto-Dead-link-Remover/blob/main/Build_Auto_Dead_Link_Remover.ipynb)
+
 A background Android TV application that automatically removes dead links from your IPTV playlists.
 
 ## Overview
