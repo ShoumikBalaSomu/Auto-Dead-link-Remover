@@ -18,6 +18,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
+import androidx.compose.material.icons.automirrored.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -542,6 +543,37 @@ fun MainScreen(
                                         onCheckedChange = { retryFailed = it },
                                         colors = SwitchDefaults.colors(checkedTrackColor = CyanAccent)
                                     )
+                                }
+                                
+                                Spacer(Modifier.height(12.dp))
+                                
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Battery Optimization", fontWeight = FontWeight.Medium)
+                                        Text(
+                                            "Disable to run forever",
+                                            fontSize = 12.sp,
+                                            color = OnSurfaceVariantDark
+                                        )
+                                    }
+                                    OutlinedButton(
+                                        onClick = {
+                                            try {
+                                                val intent = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                                    data = android.net.Uri.parse("package:${context.packageName}")
+                                                }
+                                                context.startActivity(intent)
+                                            } catch (e: Exception) {
+                                                Toast.makeText(context, "Not supported on this device", Toast.LENGTH_SHORT).show()
+                                            }
+                                        },
+                                        colors = ButtonDefaults.outlinedButtonColors(contentColor = CyanAccent)
+                                    ) {
+                                        Text("Ignore", fontSize = 12.sp)
+                                    }
                                 }
                             }
                         }

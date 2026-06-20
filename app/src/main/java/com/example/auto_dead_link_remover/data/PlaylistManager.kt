@@ -139,10 +139,11 @@ class PlaylistManager(private val context: Context) {
                 .putString("scan_eta", "Calculating...")
                 .apply()
 
-            val aliveItems = java.util.concurrent.ConcurrentLinkedQueue<PlaylistItem>()
+            val aliveFlags = BooleanArray(totalLinks)
+            val checkedUrls = ConcurrentHashMap<String, Boolean>()
 
             coroutineScope {
-                val channel = Channel<PlaylistItem>(capacity = Channel.BUFFERED)
+                val channel = Channel<IndexedValue<PlaylistItem>>(capacity = Channel.BUFFERED)
 
                 // Throttled progress reporter with speed & ETA
                 val progressJob = launch {
@@ -173,20 +174,27 @@ class PlaylistManager(private val context: Context) {
                 // Launch exactly N worker coroutines
                 val workers = List(concurrentLinks) {
                     launch {
-                        for (item in channel) {
-                            val alive = isLinkAlive(item.url, client)
-                            if (alive) {
-                                aliveCount.incrementAndGet()
-                                aliveItems.add(item)
-                            } else if (retryEnabled) {
-                                // Smart retry: try GET instead of HEAD (some servers reject HEAD)
-                                val retryAlive = isLinkAliveGet(item.url, client)
-                                if (retryAlive) {
-                                    aliveCount.incrementAndGet()
-                                    aliveItems.add(item)
-                                } else {
-                                    deadCount.incrementAndGet()
+                        for (indexed in channel) {
+                            val item = indexed.value
+                            val index = indexed.index
+                            val url = item.url
+                            
+                            val cachedAlive = checkedUrls[url]
+                            
+                            val isAlive = if (cachedAlive != null) {
+                                cachedAlive
+                            } else {
+                                var alive = isLinkAlive(url, client)
+                                if (!alive && retryEnabled) {
+                                    alive = isLinkAliveGet(url, client)
                                 }
+                                checkedUrls[url] = alive
+                                alive
+                            }
+
+                            if (isAlive) {
+                                aliveCount.incrementAndGet()
+                                aliveFlags[index] = true
                             } else {
                                 deadCount.incrementAndGet()
                             }
@@ -196,8 +204,8 @@ class PlaylistManager(private val context: Context) {
 
                 // Producer
                 launch {
-                    for (item in itemsToTest) {
-                        channel.send(item)
+                    for ((index, item) in itemsToTest.withIndex()) {
+                        channel.send(IndexedValue(index, item))
                     }
                     channel.close()
                 }
@@ -215,13 +223,18 @@ class PlaylistManager(private val context: Context) {
                     writer.write(header)
                     writer.newLine()
                 }
-                for (item in aliveItems) {
-                    item.extInf?.let {
-                        writer.write(it)
+                
+                // Write items sequentially, preserving exact original M3U order
+                for (i in itemsToTest.indices) {
+                    if (aliveFlags[i]) {
+                        val item = itemsToTest[i]
+                        item.extInf?.let {
+                            writer.write(it)
+                            writer.newLine()
+                        }
+                        writer.write(item.url)
                         writer.newLine()
                     }
-                    writer.write(item.url)
-                    writer.newLine()
                 }
             }
 
