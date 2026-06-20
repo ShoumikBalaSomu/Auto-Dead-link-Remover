@@ -77,12 +77,46 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 adb shell am start -n com.example.auto_dead_link_remover/.MainActivity
 ```
 
+### Option 4: Google Colab (No local setup required!)
+If you don't want to install anything on your computer, you can build the APK directly in your browser using Google Colab.
+
+1. Go to [Google Colab](https://colab.research.google.com/) and create a new Notebook.
+2. Paste the following code into a single cell and click **Run**:
+
+```bash
+# 1. Install Java and download Android Tools
+!apt-get update -qq && apt-get install openjdk-17-jdk wget unzip -y -qq
+!mkdir -p /root/android-sdk/cmdline-tools
+!wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmd.zip
+!unzip -q /tmp/cmd.zip -d /root/android-sdk/cmdline-tools
+!mv /root/android-sdk/cmdline-tools/cmdline-tools /root/android-sdk/cmdline-tools/latest
+
+# 2. Setup Environment Variables
+import os
+os.environ['ANDROID_HOME'] = '/root/android-sdk'
+os.environ['PATH'] += ':/root/android-sdk/cmdline-tools/latest/bin:/root/android-sdk/platform-tools'
+
+# 3. Accept Licenses and Clone Repository
+!yes | sdkmanager --licenses > /dev/null
+!git clone https://github.com/ShoumikBalaSomu/Auto-Dead-link-Remover.git
+
+# 4. Build the APK
+%cd Auto-Dead-link-Remover
+!chmod +x gradlew
+!./gradlew assembleDebug
+```
+
+3. Once the build finishes successfully, look at the **Files panel** on the left side of Colab.
+4. Navigate to `Auto-Dead-link-Remover/app/build/outputs/apk/debug/`.
+5. Right-click on `app-debug.apk` and select **Download**.
+6. Transfer the APK to your phone or TV and install it!
+
 ## Usage
-1. Open the app on your Android TV.
+1. Open the app on your Android Phone or TV.
 2. Select your source type (M3U, Xtream, or MAC) and enter your playlist links or credentials.
 3. Configure your interval, timeout, and max concurrent scan limits.
-4. Click **Save & Start Service**.
-5. Open your favorite IPTV app on the TV and add a new playlist with the URL: `http://localhost:8080/playlist.m3u`.
+4. Click **Start**.
+5. Open your favorite IPTV app and add a new playlist with the URL shown in the app: `http://localhost:8080/playlist.m3u`. (You can also share this URL with other devices on your Wi-Fi network!)
 
 ## License
 MIT License. See [LICENSE](LICENSE) for more information.
